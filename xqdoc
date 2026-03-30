@@ -1,0 +1,14 @@
+#!/bin/bash
+# xqdoc-rex: XQDoc generator for XQuery 4.0
+# Usage: ./xqdoc [--format xml|md] module.xqm
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+JAR="${SCRIPT_DIR}/target/xqdoc-rex-1.0.0-SNAPSHOT-jar-with-dependencies.jar"
+
+if [ ! -f "$JAR" ]; then
+    echo "Error: Fat JAR not found at ${JAR}" >&2
+    echo "Run 'mvn package' first." >&2
+    exit 1
+fi
+
+java -Xss16m -cp "$JAR" org.exist.xqdoc.XQDocCli "$@"
