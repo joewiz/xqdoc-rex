@@ -18,6 +18,124 @@ declare namespace xqdoc = "http://www.xqdoc.org/1.0";
 declare variable $source as xs:string external;
 
 (:~
+ : Find the xqdoc comment ((:~ ... :)) that immediately precedes an AST element.
+ : REx includes comments as text nodes between elements in the AST.
+ : We look at the preceding-sibling text nodes and parent's preceding text.
+ :)
+declare function local:find-xqdoc-comment($decl as element()) as xs:string? {
+  (: Check preceding sibling text nodes, walking backward :)
+  let $preceding-text :=
+    for $node in $decl/preceding-sibling::node()
+    return
+      if ($node instance of text()) then string($node)
+      else ()
+  (: The last preceding text node is the closest :)
+  let $closest := $preceding-text[last()]
+  return
+    if (exists($closest) and contains($closest, "(:~")) then
+      let $comment := substring-after($closest, "(:~")
+      let $comment := substring-before($comment, ":)")
+      return normalize-space($comment)
+    else
+      ()
+};
+
+(:~
+ : Parse xqdoc tags from a comment string.
+ : Returns a map with keys: description, params (sequence of maps), return,
+ : author, version, since, see, deprecated, error.
+ :)
+declare function local:parse-xqdoc-tags($comment as xs:string?) as map(*) {
+  if (empty($comment) or $comment = "") then
+    map { "description": "" }
+  else
+    let $lines := tokenize($comment, "&#10;")
+    (: Clean each line: strip leading " : " or " * " prefix :)
+    let $clean-lines :=
+      for $line in $lines
+      (: Strip leading whitespace, optional ":", optional " " :)
+      let $trimmed := replace($line, "^\s+", "")
+      let $trimmed :=
+        if (starts-with($trimmed, ": ")) then substring($trimmed, 3)
+        else if ($trimmed = ":") then ""
+        else $trimmed
+      return $trimmed
+    let $text := string-join($clean-lines, "&#10;")
+
+    (: Split into description (before first @tag) and tags :)
+    let $parts := tokenize($text, "\s*@")
+    let $description := replace(normalize-space($parts[1]), "\s*:\s*$", "")
+
+    (: Parse @tags from remaining parts :)
+    let $tags := subsequence($parts, 2)
+    let $clean := function($s) { replace(normalize-space($s), "\s*:\s*$", "") }
+    let $params :=
+      for $tag in $tags
+      where starts-with($tag, "param ")
+      let $rest := substring-after($tag, "param ")
+      let $name := replace($rest, "^(\$?\S+)\s.*$", "$1")
+      let $desc := $clean(substring-after($rest, $name))
+      return map { "name": $name, "description": $desc }
+    let $return :=
+      for $tag in $tags
+      where starts-with($tag, "return ")
+      return $clean(substring-after($tag, "return "))
+    let $author :=
+      for $tag in $tags
+      where starts-with($tag, "author ")
+      return $clean(substring-after($tag, "author "))
+    let $version :=
+      for $tag in $tags
+      where starts-with($tag, "version ")
+      return $clean(substring-after($tag, "version "))
+    let $since :=
+      for $tag in $tags
+      where starts-with($tag, "since ")
+      return $clean(substring-after($tag, "since "))
+    let $see :=
+      for $tag in $tags
+      where starts-with($tag, "see ")
+      return $clean(substring-after($tag, "see "))
+    let $deprecated :=
+      for $tag in $tags
+      where starts-with($tag, "deprecated ")
+      return $clean(substring-after($tag, "deprecated "))
+    let $error :=
+      for $tag in $tags
+      where starts-with($tag, "error ")
+      return $clean(substring-after($tag, "error "))
+    return map {
+      "description": $description,
+      "params": array { $params },
+      "return": string-join($return, " "),
+      "author": string-join($author, ", "),
+      "version": string-join($version, " "),
+      "since": string-join($since, " "),
+      "see": $see,
+      "deprecated": string-join($deprecated, " "),
+      "error": $error
+    }
+};
+
+(:~
+ : Build xqdoc:comment element from parsed tags.
+ :)
+declare function local:build-comment($tags as map(*)) as element(xqdoc:comment) {
+  <xqdoc:comment>
+    <xqdoc:description>{$tags("description")}</xqdoc:description>
+    {for $p in $tags("params")?*
+     return <xqdoc:param>{$p("name")} - {$p("description")}</xqdoc:param>}
+    {if ($tags("return") != "") then <xqdoc:return>{$tags("return")}</xqdoc:return> else ()}
+    {if ($tags("author") != "") then <xqdoc:author>{$tags("author")}</xqdoc:author> else ()}
+    {if ($tags("version") != "") then <xqdoc:version>{$tags("version")}</xqdoc:version> else ()}
+    {if ($tags("since") != "") then <xqdoc:since>{$tags("since")}</xqdoc:since> else ()}
+    {for $s in $tags("see") return <xqdoc:see>{$s}</xqdoc:see>}
+    {if ($tags("deprecated") != "") then <xqdoc:deprecated>{$tags("deprecated")}</xqdoc:deprecated> else ()}
+    {for $e in $tags("error") return <xqdoc:error>{$e}</xqdoc:error>}
+  </xqdoc:comment>
+};
+
+(:~
  : Strip surrounding quotes from a string literal token.
  : The REx parser preserves the quote characters in the AST text.
  :)
@@ -171,11 +289,11 @@ declare function local:process-function($func-decl as element()) as element(xqdo
     for $ann in $annotations
     return string($ann/@name)
   let $signature := local:build-signature($name, $params, $return-type, $ann-names)
+  let $comment-text := local:find-xqdoc-comment($func-decl)
+  let $tags := local:parse-xqdoc-tags($comment-text)
   return
     <xqdoc:function arity="{$arity}">
-      <xqdoc:comment>
-        <xqdoc:description/>
-      </xqdoc:comment>
+      {local:build-comment($tags)}
       <xqdoc:name>{$name}</xqdoc:name>
       {if (exists($annotations)) then
         <xqdoc:annotations>{$annotations}</xqdoc:annotations>
@@ -208,11 +326,11 @@ declare function local:process-variable($var-decl as element()) as element(xqdoc
     else
       ()
   let $annotations := local:extract-annotations($var-decl)
+  let $comment-text := local:find-xqdoc-comment($var-decl)
+  let $tags := local:parse-xqdoc-tags($comment-text)
   return
     <xqdoc:variable>
-      <xqdoc:comment>
-        <xqdoc:description/>
-      </xqdoc:comment>
+      {local:build-comment($tags)}
       <xqdoc:name>{$var-name}</xqdoc:name>
       {if (exists($annotations)) then
         <xqdoc:annotations>{$annotations}</xqdoc:annotations>
@@ -288,7 +406,9 @@ return
 let $module := $ast/self::XQuery
 
 (: Determine module type :)
-let $is-library := exists($module//LibraryModule)
+let $lib-module := $module//LibraryModule
+let $main-module := $module//MainModule
+let $is-library := exists($lib-module)
 let $module-type := if ($is-library) then "library" else "main"
 
 (: Extract module declaration (library modules only) :)
@@ -299,6 +419,11 @@ let $module-prefix :=
 let $module-uri :=
   if ($module-decl) then local:unquote(normalize-space(string($module-decl/URILiteral)))
   else ""
+
+(: Extract the module-level xqdoc comment :)
+let $module-element := if ($is-library) then $lib-module else $main-module
+let $module-comment-text := local:find-xqdoc-comment($module-element)
+let $module-tags := local:parse-xqdoc-tags($module-comment-text)
 
 (: Find all function declarations :)
 let $func-decls := $module//FunctionDecl
@@ -324,9 +449,7 @@ return
       {if ($module-prefix != "") then
         <xqdoc:name>{$module-prefix}</xqdoc:name>
       else ()}
-      <xqdoc:comment>
-        <xqdoc:description/>
-      </xqdoc:comment>
+      {local:build-comment($module-tags)}
     </xqdoc:module>
 
     {if (exists($imports)) then
